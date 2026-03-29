@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Auto-Eval3D — ViewFusion Spatial Coherence Evaluator</title>
+  <meta name="description" content="Automated 3D spatial coherence evaluation powered by World Labs Marble API and Gemini 2.5 Pro. Multi-view reasoning for detecting geometric hallucinations in generated 3D worlds." />
+  <link rel="stylesheet" href="/static/style.css" />
+
+  <!-- THREE.js + SparkJS via importmap (jsdelivr for THREE.js, sparkjs.dev for Spark) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.178.0/examples/jsm/",
+      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+
+  <!-- ═══ Top Bar ═══ -->
+  <header class="topbar" id="topbar">
+    <div class="topbar-brand">
+      <div class="topbar-logo">3D</div>
+      <div>
+        <div class="topbar-title">Auto-Eval3D</div>
+        <div class="topbar-subtitle">ViewFusion Spatial Coherence Evaluator</div>
+      </div>
+    </div>
+    <div class="status-indicator" id="status-indicator">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">Ready</span>
+    </div>
+  </header>
+
+  <!-- ═══ Main Layout ═══ -->
+  <main class="main-container">
+
+    <!-- ── Left Column: Controls + 3D Viewer ── -->
+    <section class="left-column">
+
+      <!-- Control Panel -->
+      <div class="card control-panel" id="control-panel">
+        <div class="card-header">
+          <h3>⚡ Generation Controls</h3>
+        </div>
+        <div class="card-body">
+          <div class="input-group">
+            <label for="prompt-input">Spatial Prompt</label>
+            <textarea id="prompt-input" class="text-input" rows="2"
+              placeholder="e.g. A medieval library with towering bookshelves, a globe, and arched stone windows letting in warm light..."></textarea>
+          </div>
+
+          <!-- Sample Prompts -->
+          <div class="sample-prompts" id="sample-prompts">
+            <label class="sample-prompts-label">Try a sample:</label>
+            <div class="sample-prompts-list">
+              <button class="sample-prompt-btn" data-prompt="A medieval library with towering oak bookshelves, a large brass globe, and arched stone windows letting in warm golden light">📚 Medieval Library</button>
+              <button class="sample-prompt-btn" data-prompt="A futuristic space station control room with holographic displays, curved metal walls, and a large viewport showing Earth">🚀 Space Station</button>
+              <button class="sample-prompt-btn" data-prompt="A cozy Japanese tea house with tatami mats, sliding paper doors, a low wooden table, and a small zen garden visible through an open wall">🏯 Tea House</button>
+            </div>
+          </div>
+
+          <div class="input-group">
+            <label for="model-select">Generation Mode</label>
+            <select id="model-select" class="select-input">
+              <option value="Marble 0.1-mini">⚡ Draft Mode (30-45s, low cost)</option>
+              <option value="Marble 0.1-plus">🎨 High-Fidelity Mode (~5 min)</option>
+            </select>
+          </div>
+          <button id="btn-generate" class="btn-generate" type="button">
+            <span class="spinner"></span>
+            <span class="btn-text">Generate & Evaluate</span>
+          </button>
+
+          <!-- Progress Steps -->
+          <div class="pipeline-progress" id="pipeline-progress" style="display: none;">
+            <div class="progress-step" id="step-generate">
+              <span class="progress-step-icon">⏳</span>
+              <span class="progress-step-text">Generating 3D world...</span>
+            </div>
+            <div class="progress-step" id="step-load">
+              <span class="progress-step-icon">⏳</span>
+              <span class="progress-step-text">Loading Gaussian Splat...</span>
+            </div>
+            <div class="progress-step" id="step-capture">
+              <span class="progress-step-icon">⏳</span>
+              <span class="progress-step-text">Capturing 4 viewpoints...</span>
+            </div>
+            <div class="progress-step" id="step-evaluate">
+              <span class="progress-step-icon">⏳</span>
+              <span class="progress-step-text">Gemini evaluating coherence...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3D Viewer -->
+      <div class="card" id="viewer-card">
+        <div class="card-header">
+          <h3>🌐 3D Gaussian Splat Viewer</h3>
+          <span class="viewer-hint" id="viewer-hint" style="display: none;">Drag to orbit • Scroll to zoom</span>
+        </div>
+        <div class="card-body" style="padding: 12px;">
+          <div class="viewer-container" id="viewer-container">
+            <div class="viewer-overlay" id="viewer-overlay">
+              <div class="viewer-overlay-icon">🌍</div>
+              <div class="viewer-overlay-text">No world loaded</div>
+              <div class="viewer-overlay-subtext">Generate a world to see it rendered here</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Right Column: Viewpoints + Results + History ── -->
+    <aside class="right-column">
+
+      <!-- Multi-View Capture Grid -->
+      <div class="card" id="viewpoints-card">
+        <div class="card-header">
+          <h3>📸 Multi-View Capture</h3>
+        </div>
+        <div class="viewpoints-grid" id="viewpoints-grid">
+          <div class="viewpoint-cell" id="vp-0">
+            <div class="viewpoint-placeholder">
+              <div class="viewpoint-placeholder-icon">📷</div>
+              0° Front
+            </div>
+          </div>
+          <div class="viewpoint-cell" id="vp-1">
+            <div class="viewpoint-placeholder">
+              <div class="viewpoint-placeholder-icon">📷</div>
+              90° Right
+            </div>
+          </div>
+          <div class="viewpoint-cell" id="vp-2">
+            <div class="viewpoint-placeholder">
+              <div class="viewpoint-placeholder-icon">📷</div>
+              180° Back
+            </div>
+          </div>
+          <div class="viewpoint-cell" id="vp-3">
+            <div class="viewpoint-placeholder">
+              <div class="viewpoint-placeholder-icon">📷</div>
+              270° Left
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VLM Scorecard -->
+      <div class="card" id="score-card-container">
+        <div class="card-header">
+          <h3>🧠 VLM Spatial Scorecard</h3>
+        </div>
+        <div class="score-card" id="score-card">
+          <div class="score-card-empty" id="score-empty">
+            Evaluation results will appear here after multi-view analysis
+          </div>
+          <div id="score-content" style="display: none;">
+            <!-- Populated dynamically by app.js -->
+          </div>
+        </div>
+      </div>
+
+      <!-- History -->
+      <div class="card history-card" id="history-card">
+        <div class="card-header">
+          <h3>📊 Evaluation History</h3>
+        </div>
+        <div class="card-body">
+          <ul class="history-list" id="history-list">
+            <li class="history-empty" id="history-empty">No evaluations yet</li>
+          </ul>
+          <div class="history-pagination" id="history-pagination" style="display: none;">
+            <button id="history-prev" disabled>← Prev</button>
+            <span id="history-page-info">1 / 1</span>
+            <button id="history-next" disabled>Next →</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ═══ App Logic ═══ -->
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
