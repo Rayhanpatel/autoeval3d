@@ -11,11 +11,9 @@ Endpoints:
 
 import os
 import re
-import json
 import asyncio
 import logging
 import base64
-from typing import Optional
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -50,7 +48,7 @@ if GOOGLE_CLOUD_PROJECT:
 
 # ── Lifespan (replaces deprecated @app.on_event) ──
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     init_db()
     logger.info("Auto-Eval3D backend started")
     yield
@@ -177,47 +175,43 @@ async def evaluate_scene(req: EvaluateRequest):
         raise HTTPException(status_code=400, detail="Exactly 4 viewpoint images are required")
 
     # Build the ViewFusion system instruction (elevated authority)
-    system_instruction = """You are an expert spatial coherence evaluator for AI-generated 3D environments.
-
-You are given 4 screenshots captured from different viewpoints of the same 3D Gaussian Splat scene.
-The original prompt used to generate this world was: "{prompt}"
-
-Your task is to evaluate the spatial coherence, geometric consistency, and prompt alignment of this 3D world.
-
-You MUST structure your response using the following XML tags:
-
-<spatial_thinking>
-Cross-View Spatial Pre-Alignment:
-Analyze each image pair for geometric consistency. Check for:
-- Objects that appear in one view but vanish in another
-- Surfaces that warp, stretch, or change shape between views
-- Scale inconsistencies between near and far objects
-- Lighting direction inconsistencies across views
-- Floating geometry or objects disconnected from surfaces
-- Objects with multiple faces (Janus artifacts)
-- Ground plane discontinuities
-</spatial_thinking>
-
-<thinking>
-Reasoning and Evaluation:
-Based on your spatial analysis, reason about the overall quality:
-- Does the scene match the text prompt?
-- Are there physical impossibilities?
-- Rate each category: Geometric Consistency, Prompt Alignment, Physical Plausibility, Visual Quality
-</thinking>
-
-<answer>
-Final Assessment:
-Provide a concise summary of findings, listing specific artifacts found.
-End with a single integer SCORE from 1-10 where:
-1-3 = Severe spatial failures (floating objects, Janus artifacts, missing geometry)
-4-5 = Noticeable issues but recognizable scene
-6-7 = Minor inconsistencies, generally coherent
-8-9 = High quality with very minor issues
-10 = Perfect spatial coherence
-
-SCORE: [your score]
-</answer>""".format(prompt=req.prompt)
+    # Use concatenation instead of .format() to avoid KeyError if prompt contains {curly braces}
+    system_instruction = (
+        "You are an expert spatial coherence evaluator for AI-generated 3D environments.\n\n"
+        "You are given 4 screenshots captured from different viewpoints of the same 3D Gaussian Splat scene.\n"
+        "The original prompt used to generate this world was: " + req.prompt + "\n\n"
+        "Your task is to evaluate the spatial coherence, geometric consistency, and prompt alignment of this 3D world.\n\n"
+        "You MUST structure your response using the following XML tags:\n\n"
+        "<spatial_thinking>\n"
+        "Cross-View Spatial Pre-Alignment:\n"
+        "Analyze each image pair for geometric consistency. Check for:\n"
+        "- Objects that appear in one view but vanish in another\n"
+        "- Surfaces that warp, stretch, or change shape between views\n"
+        "- Scale inconsistencies between near and far objects\n"
+        "- Lighting direction inconsistencies across views\n"
+        "- Floating geometry or objects disconnected from surfaces\n"
+        "- Objects with multiple faces (Janus artifacts)\n"
+        "- Ground plane discontinuities\n"
+        "</spatial_thinking>\n\n"
+        "<thinking>\n"
+        "Reasoning and Evaluation:\n"
+        "Based on your spatial analysis, reason about the overall quality:\n"
+        "- Does the scene match the text prompt?\n"
+        "- Are there physical impossibilities?\n"
+        "- Rate each category: Geometric Consistency, Prompt Alignment, Physical Plausibility, Visual Quality\n"
+        "</thinking>\n\n"
+        "<answer>\n"
+        "Final Assessment:\n"
+        "Provide a concise summary of findings, listing specific artifacts found.\n"
+        "End with a single integer SCORE from 1-10 where:\n"
+        "1-3 = Severe spatial failures (floating objects, Janus artifacts, missing geometry)\n"
+        "4-5 = Noticeable issues but recognizable scene\n"
+        "6-7 = Minor inconsistencies, generally coherent\n"
+        "8-9 = High quality with very minor issues\n"
+        "10 = Perfect spatial coherence\n\n"
+        "SCORE: [your score]\n"
+        "</answer>"
+    )
 
     # Prepare image parts for Gemini (images + viewpoint labels only)
     content_parts = ["Here are the 4 viewpoint images:\n"]
@@ -233,19 +227,23 @@ SCORE: [your score]
         content_parts.append(Part.from_data(data=image_bytes, mime_type="image/jpeg"))
         content_parts.append(f"\n[Image {i+1}: Viewpoint at {i * 90}° azimuth]\n")
 
-    # Call Gemini 2.5 Pro with system_instruction for elevated prompt authority
-    try:
+    # Call Gemini 2.5 Pro — wrapped in executor to avoid blocking the async event loop
+    def _call_gemini():
         model = GenerativeModel(
             GEMINI_MODEL,
             system_instruction=system_instruction,
         )
-        response = model.generate_content(
+        return model.generate_content(
             content_parts,
             generation_config={
                 "temperature": 0.2,
                 "max_output_tokens": 4096,
             }
         )
+
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, _call_gemini)
         raw_text = response.text
     except Exception as e:
         logger.error(f"Gemini API error: {e}")
@@ -360,11 +358,12 @@ def _extract_tag(text: str, tag: str) -> str:
 
 def _extract_score(answer_text: str) -> int:
     """Extract integer score from the answer text."""
-    match = re.search(r"SCORE:\s*(\d+)", answer_text)
+    # Case-insensitive match for "SCORE: N" or "Score: N"
+    match = re.search(r"score:\s*(\d+)", answer_text, re.IGNORECASE)
     if match:
         return max(1, min(10, int(match.group(1))))
-    # Fallback: look for any digit at the end
-    match = re.search(r"(\d+)\s*$", answer_text)
+    # Fallback: look for a standalone 1-2 digit number preceded by a newline or space
+    match = re.search(r"(?<!\d)([1-9]|10)(?!\d)\s*$", answer_text.strip())
     if match:
         return max(1, min(10, int(match.group(1))))
     return 5  # default middle score

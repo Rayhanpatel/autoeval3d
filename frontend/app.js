@@ -83,6 +83,9 @@ function initThreeJS() {
   });
   state.renderer.setSize(w, h);
   state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // ACES filmic tone mapping — makes Gaussian splats look cinematic
+  state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  state.renderer.toneMappingExposure = 1.0;
 
   container.insertBefore(state.renderer.domElement, container.firstChild);
 
@@ -187,22 +190,22 @@ async function loadSplatMesh(spzUrl) {
       throw new Error("Splat loaded but bounding box is empty — possible corrupt SPZ file");
     }
 
-    // Get center in LOCAL splat space, then transform to WORLD space
-    // (accounts for the Math.PI X-rotation applied above)
-    const localCenter = new THREE.Vector3();
-    bbox.getCenter(localCenter);
-    const center = localCenter.clone();
-    splat.localToWorld(center);
-
     const size = new THREE.Vector3();
     bbox.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
 
-    // Camera at the center of the scene (inside the room)
-    state.camera.position.copy(center);
+    // Marble generates scenes with the natural camera AT the world origin (0,0,0).
+    // Using the bbox center is wrong — after the Math.PI X-rotation, Z flips too,
+    // so localToWorld produces a displaced center that may point away from the room.
+    // Simply use the origin as the standing position, matching how Marble captured it.
+    const center = new THREE.Vector3(0, 0, 0);
 
-    // Look forward into the scene (negative Z direction from center)
-    const lookTarget = new THREE.Vector3(center.x, center.y, center.z - 2);
+    // Eye level: slightly below origin (origin is mid-room height in Marble scenes)
+    const eyeY = -maxDim * 0.05;
+    state.camera.position.set(0, eyeY, 0);
+
+    // Look forward into the scene (-Z after the Math.PI flip = into the room)
+    const lookTarget = new THREE.Vector3(0, eyeY, -2);
     state.camera.lookAt(lookTarget);
     state.sceneCenter.copy(center);
 
@@ -235,7 +238,7 @@ async function captureMultiView(sceneInfo) {
   setStatus("Capturing multi-view perspectives...", "active");
   state.capturedImages = [];
 
-  const { center, maxDim } = sceneInfo;
+  const { maxDim } = sceneInfo;
   const labels = ["0° Front", "90° Right", "180° Back", "270° Left"];
   const angles = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
 
@@ -245,22 +248,23 @@ async function captureMultiView(sceneInfo) {
   for (let i = 0; i < 4; i++) {
     const angle = angles[i];
 
-    // Camera at center (INSIDE the room)
-    state.camera.position.set(center.x, center.y, center.z);
+    // Camera at origin eye level (Marble's natural camera position)
+    const eyeY = -maxDim * 0.05;
+    state.camera.position.set(0, eyeY, 0);
 
-    // Compute look direction for this viewpoint
-    const lookX = center.x + Math.sin(angle) * 5;
-    const lookZ = center.z - Math.cos(angle) * 5;
-    const lookTarget = new THREE.Vector3(lookX, center.y, lookZ);
+    // Compute look direction for this viewpoint (rotate in place around Y axis)
+    const lookX = Math.sin(angle) * 5;
+    const lookZ = -Math.cos(angle) * 5;
+    const lookTarget = new THREE.Vector3(lookX, eyeY, lookZ);
 
     // Force camera orientation update
     state.camera.lookAt(lookTarget);
     state.camera.updateProjectionMatrix();
     state.camera.updateMatrixWorld(true);
 
-    // Also update controls target so render loop doesn't fight us
+    // Update controls target (do NOT call controls.update() — controls are disabled
+    // during capture and calling update() would apply damping and override lookAt)
     state.controls.target.copy(lookTarget);
-    state.controls.update();
 
     // CRITICAL: Wait for SparkJS WebWorkers to re-sort gaussians for new viewpoint
     await waitFrames(20);
@@ -285,9 +289,10 @@ async function captureMultiView(sceneInfo) {
     setStatus(`Captured viewpoint ${i + 1}/4: ${labels[i]}`, "active");
   }
 
-  // Reset camera to initial interior view and re-enable controls
-  state.camera.position.copy(center);
-  const resetTarget = new THREE.Vector3(center.x, center.y, center.z - 2);
+  // Reset camera to origin eye level and re-enable controls
+  const resetEyeY = -maxDim * 0.05;
+  state.camera.position.set(0, resetEyeY, 0);
+  const resetTarget = new THREE.Vector3(0, resetEyeY, -2);
   state.camera.lookAt(resetTarget);
   state.controls.target.copy(resetTarget);
   state.controls.enabled = true;
@@ -300,9 +305,12 @@ async function captureMultiView(sceneInfo) {
 function waitFrames(count) {
   return new Promise((resolve) => {
     let frames = 0;
+    // Fallback timeout in case rAF stalls (e.g. tab is hidden/backgrounded)
+    const timeout = setTimeout(resolve, count * 32 + 500);
     function tick() {
       frames++;
       if (frames >= count) {
+        clearTimeout(timeout);
         resolve();
       } else {
         requestAnimationFrame(tick);
